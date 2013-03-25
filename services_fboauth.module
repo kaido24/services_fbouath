@@ -1,0 +1,174 @@
+<?php
+/*error_reporting(E_ALL);
+ini_set('display_errors', TRUE);
+ini_set('display_startup_errors', TRUE);*/
+/**
+ * Implements hook_services_resources().
+ * Inspired by http://grasmash.com/article/integrating-fboauth-services.
+ */
+function services_fboauth_services_resources() {
+  $definition['user']['actions']['fbconnect'] = array(
+    'help' => 'Login a user for a new session via FBOAuth',
+    'callback' => 'services_fboauth_connect',
+    'args' => array(
+      array(
+        'name' => 'access_token',
+        'type' => 'string',
+        'description' => 'A valid Facebook access token',
+        'source' => 'data',
+        'optional' => FALSE,
+      ),
+      array(
+        'name' => 'fb_uid',
+        'type' => 'string',
+        'description' => 'Facebook uid',
+        'source' => 'data',
+        'optional' => FALSE,
+      ),
+    ),
+    // The services module says this about services_access_menu: 
+    // "If you think you need it you are almost certainly wrong."
+    // But I think that this is one of those rare exceptions.
+    'access callback' => 'services_access_menu',
+  );
+  return $definition;
+}
+
+/**
+ * Allow FBOAUTH CONNECT via services.
+ *
+ * @param $data,
+ *   An associative array containing:
+  *  - fb_uid: Facebook user id.
+ *   - access_token: a valid Facebook access token (not access code).
+ *     The requesting application must have already gone through the 
+ *     process of requesting permissions, getting access code, requesting
+ *     access token, etc.
+ *
+ * @return
+ *   A valid session object, just like _user_resource_login().
+ */
+function services_fboauth_connect($data) {
+  global $user;
+  // Include fboauth functions as required.
+  module_load_include('inc', 'fboauth', 'includes/fboauth.fboauth');
+  $access_token = $data['access_token'];
+  $fb_uid       = $data['fb_uid'];
+  $app_id       = variable_get('fboauth_id', '');
+  $graph_result = drupal_http_request('https://graph.facebook.com/' . $fb_uid . '?access_token=' . $access_token);
+  $fbuser = json_decode($graph_result->data);
+  $uid = fboauth_uid_load($fbuser->id);
+  if ($user->uid && $uid && ($account = user_load($uid))) {
+    // user is already logged in
+    $return_user = services_fboauth_unset($account);
+    services_fboauth_friend_import($fbuser->id, $app_id, $access_token);
+    return $return_user;
+  }
+  // if user id exists and fbauth uid is mapped login.
+  if (!$user->uid && $uid && ($account = user_load($uid))) {
+    if ($account->status) {
+      sess_regenerate();
+
+      $return = new stdClass();
+      $return->sessid = session_id();
+      $return->session_name = session_name();
+      fboauth_login_user($account);
+      $return->user = services_fboauth_unset($account);
+       services_fboauth_friend_import($fbuser->id, $app_id, $access_token);
+      return $return;
+    }
+    else {
+      $message = t('The username %name has not been activated or is blocked.', array('%name' => $account->name));
+    }
+  }
+   // If the Facebook e-mail address matches an existing account, bind them
+  // together and log in as that account.
+  elseif (!empty($fbuser->email) && ($account = user_load(array('mail' => $fbuser->email)))) {
+    fboauth_save($account->uid, $fbuser->id);
+    _services_fboauth_login($account, $access_token);
+     services_fboauth_friend_import($fbuser->id, $app_id, $access_token);
+  }
+  // If user uid is true regenerate some data.
+  else {
+    if ($user->uid) {
+      fboauth_save($user->uid, $fbuser->id);
+      $message = t('You\'ve connected your account with Facebook.');
+      _services_fboauth_login($account, $access_token);
+       services_fboauth_friend_import($fbuser->id, $app_id, $access_token);
+    }
+    else {
+      $account = fboauth_create_user($fbuser);
+      // Load the account fresh just to have a fully-loaded object.
+      $account = user_load($account->uid);
+      sess_regenerate();
+      $return = new stdClass();
+      $return->sessid = session_id();
+      $return->session_name = session_name();
+      //$return->user = $account;
+      fboauth_login_user($account);
+      $return->user = services_fboauth_unset($account);
+       services_fboauth_friend_import($fbuser->id, $app_id, $access_token);
+      return $return;
+    }
+  }
+  $message = 'Not found';
+  watchdog('services_fboauth', $message);
+  return services_error($message, 401);
+}
+/**
+ * Regenerate session and login user.s
+ */
+function _services_fboauth_login($account, $access_token) {
+  sess_regenerate();
+  $return = new stdClass();
+  $return->sessid = session_id();
+  $return->session_name = session_name();
+  //$return->user = $account;
+  fboauth_login_user($account);
+  $return->user = services_fboauth_unset($account);
+  return $return;
+}
+function services_fboauth_unset($user) {
+  unset($user->data, $user->pass, $user->theme, $user->form_build_id, $user->mimemail_textonly, $user->picture_delete, $user->block, $user->menu);
+  return $user;
+}
+
+
+function services_fboauth_friend_import($fbid, $app_id, $access_token) {
+  global $user;
+  $uid = $user->uid;
+  $fql_query_url = "https://graph.facebook.com/fql?q=SELECT+uid+FROM+user+WHERE+is_app_user={$app_id}+and+uid+IN(SELECT+uid2+FROM+friend+WHERE+uid1={$fbid})&access_token={$access_token}&format=json-strings";
+  $fql_query_result = file_get_contents($fql_query_url);
+  $fql_query_obj = json_decode($fql_query_result, TRUE);
+  //$fql_query_obj = json_decode($fql_query_result, TRUE, 512, JSON_BIGINT_AS_STRING);
+
+  // Create new profile object.
+  $profile = services_fboauth_profile_load($uid);
+  if (!isset($profile->nid)) {
+    $profile->created = time();
+    $profile->changed = $profile->created;
+    $profile->promote = 0; // Display on front page ? 1 : 0
+    $profile->sticky = 0;  // Display top of page ? 1 : 0
+    $profile->format = 1;  // 1:Filtered HTML, 2: Full HTML
+    $profile->status = 1;  // Published ? 1 : 0
+    $profile->language = 'en';
+    $profile->uid = $user->uid;
+    $profile->type = 'profile';
+    $profile->title = $user->name;
+  }
+  foreach ($fql_query_obj['data'] as $nr => $val) {
+    // load user id by facebook id.
+    // print_r($val['uid']);
+    //$profile->field_fb_friends[$nr]['uid'] = $uid;
+    $profile->field_fb_friend_id[$nr]['value'] = $val['uid'];
+  }
+  if ($profile = node_submit($profile)) {
+    node_save($profile);
+  }
+}
+
+function services_fboauth_profile_load($uid) {
+  $result = db_fetch_object(db_query("SELECT nid FROM {node} WHERE type = 'profile' AND uid = '%d'", $uid));
+  $profile = node_load($result->nid, '', TRUE);
+  return $profile;
+}

@@ -1,0 +1,7 @@
+name = Services FBOauth
+description = Provides FBOAuth integration for the Services module.
+package = services
+core = 6.x
+ 
+dependencies[] = services
+dependencies[] = fboauth
