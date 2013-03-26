@@ -25,6 +25,21 @@ function services_fboauth_services_resources() {
         'source' => 'data',
         'optional' => FALSE,
       ),
+      array(
+	'name' => 'lat',
+        'type' => 'string',
+        'description' => 'Lattitude',
+        'source' => 'data',
+        'optional' => FALSE,
+      ),
+      array(
+	'name' => 'lon',
+        'type' => 'string',
+        'description' => 'Longitude',
+        'source' => 'data',
+        'optional' => FALSE,
+      ),
+
     ),
     // The services module says this about services_access_menu: 
     // "If you think you need it you are almost certainly wrong."
